@@ -1,49 +1,90 @@
-# WAY-EEG-GAL Utilities — Brainhack Rome 2025
+# WAY-EEG-GAL preprocessing
 
-This repository contains tools and scripts to convert EEG recordings from the WAY-EEG-GAL dataset ([Luciw et al., 2014](https://www.nature.com/articles/sdata201447)) into machine learning-ready tensors that contain event-aligned EEG sequences. The resulting dataset was used to forecast motor behaviour at [Brainhack Rome 2025](https://brainhackrome.github.io/) (project repository [here](https://github.com/matteo-d-m/brainhack-rome-forecasting)) and in related follow-ups. 
+Tools for converting EEG recordings from the
+[WAY-EEG-GAL dataset](https://figshare.com/collections/WAY_EEG_GAL_Multi_channel_EEG_Recordings_During_3_936_Grasp_and_Lift_Trials_with_Varying_Weight_and_Friction/988376)
+(Luciw et al., 2014) into tensors aligned to events and ready for machine learning.
+
+The original dataset is MATLAB centric and multimodal. This pipeline standardises the EEG files into
+neural component matrices cleaned of artefacts, and into windows locked to events, matching the input
+conventions of common deep learning libraries in Python.
+
+Built at [Brainhack Rome 2025](https://brainhackrome.github.io/). The resulting tensors are used to
+forecast motor behaviour from EEG recorded before movement onset in
+[brainhack-rome-forecasting](https://github.com/matteo-d-m/brainhack-rome-forecasting).
+
+## Pipeline
+
+| Stage | Directory | Input | Output |
+|---|---|---|---|
+| 0. MATLAB to JSON | `mat_to_json/` | `HS_P*_S*.mat`, `P*_AllLifts.mat` | Session and marker JSON |
+| 1. Bandpass and channel selection | `ica/bandpass_filter.py` | `HS_P*_S*.json` | `HS_P*_S*_processed.json` |
+| 2. ICA and ICLabel | `ica/ica.py` | processed JSON | `HS_P1_S<run>_eeg.npy` (components × time) |
+| 3. Windows aligned to events | `windows/sequences.py` | components and `P1_AllLifts.json` | `train_sequences.pkl` |
+
+**Stage 0.** The `.mat` files are converted into two classes of JSON: *session files* (EEG, EMG, KIN,
+ENV and MISC sections, each with signals, channel names and sampling rates) and *marker files*
+(event tables with trial information). Original sampling rates are preserved.
+
+**Stage 1.** Retains 14 frontocentral channels and applies a Butterworth bandpass with zero phase
+(0.5 to 40 Hz), removing slow drifts and noise at high frequencies. Cleaned signals are written to
+the `EEG.filtered_data` field.
+
+**Stage 2.** Builds an MNE `Raw` object, assigns the standard 10/20 montage and an average
+reference, then fits ICA to decompose the EEG into independent components. Components are classified
+as brain, ocular, muscular or other by
+[ICLabel](https://www.sciencedirect.com/science/article/pii/S1053811919304185)
+(Pion-Tonachini et al., 2019). Components not classified as brain are discarded, and those retained
+are saved as NumPy arrays.
+
+**Stage 3.** Combines the component matrices with the event marker file. For each trial, two windows
+are extracted around the `LEDOn` event: a **past** window of 1000 samples (roughly 2 s before) and a
+**future** window of 1500 samples (roughly 3 s after), at the sampling rate of 500 Hz. The pairs are
+collected across trials and pickled as the training set for a forecasting model.
 
 ## Dataset
-We use the publicly available [WAY-EEG-GAL dataset](https://figshare.com/collections/WAY_EEG_GAL_Multi_channel_EEG_Recordings_During_3_936_Grasp_and_Lift_Trials_with_Varying_Weight_and_Friction/988376) described in [Luciw et al., 2014](https://www.nature.com/articles/sdata201447). This is an open source dataset containing 32-channels EEG recordings from 12 participants performing 3936 grasp-and-lift trials under unpredictable changes of object weight and surface friction. The EEG sampling rate is 500 Hz.
 
-The original dataset is MATLAB-centric and multi-modal, including both EEG and non-EEG (e.g., EMG) files. The code in this repository standardises the EEG files into neural component matrices and simple, event-locked windows that match deep learning input conventions and can be easily used with common Python libraries.
+EEG from 32 channels, 12 participants, 3,936 grasp and lift trials, recorded under unpredictable
+changes of object weight and surface friction, sampled at 500 Hz. Open access, CC BY 4.0.
 
-### Conversion from MATLAB to JSON
+Data descriptor: Luciw, Jarocka & Edin (2014), *Multi-channel EEG recordings during 3,936 grasp and
+lift trials with varying weight and friction*, **Scientific Data** 1:140047.
+[Paper](https://www.nature.com/articles/sdata201447). Please cite it if you use the data.
 
-The original WAY-EEG-GAL dataset consists of MATLAB `.mat` files. To make them easier to handle in Python, we converted those files into two classes of JSON files:
+## Installation
 
-1. **Session files:** JSON files with EEG, EMG, KIN, ENV, and MISC sections — each one containing signals, channel names, and sampling rates. These files correspond to `{HS_P*_S*, WS_P*_S*}.mat` files in the original dataset
-2. **Marker files:** JSON files with columns and data tables storing event information. These files correspond to `P*_AllLifts.mat` in the original dataset 
+```bash
+git clone https://github.com/annanotaro/way-eeg-gal-preprocessing
+cd way-eeg-gal-preprocessing
+pip install -r requirements.txt
+```
 
-This keeps the original sampling rates and provides a consistent, machine learning-friendly format for downstream processing.
+Requires MNE-Python, `mne-icalabel`, NumPy and SciPy.
 
-## Data Preprocessing
-### 1. Band-pass filtering and channel selection
+## Usage
 
-The first preprocessing step is handled by `bandpass_filter.py`. Starting from the original per-series JSON files (`{HS_P*_S*.json}`) that contain the EEG recordings, the code retains 14 fronto-central EEG channels of interest and filters the corresponding signals with a zero-phase Butterworth band-pass filter (0.5–40 Hz) to remove slow drifts and high-frequency noise. The output of this stage is a processed JSON file (`HS_P*_S*_processed.json`) that contains the cleaned EEG data, stored in the `EEG.filtered_data` field.
+```bash
+python ica/bandpass_filter.py     # stage 1
+python ica/ica.py                 # stage 2
+python windows/sequences.py       # stage 3, writes train_sequences.pkl
+```
 
-### 2. ICA and ICLabel for neural components
+## Assumptions and scope
 
-The second preprocessing step is performed by `ica.py`. Starting from the JSON file produced by `bandpass_filter.py`, the code in `ica.py` constructs an MNE Raw object, assigns the standard 10–20 montage, and applies an average reference. Subsequently, it fits an Independent Component Analysis (ICA) model to decompose the EEG into statistically independent components. The resulting components are automatically classified as either brain, ocular, muscular, or other using the ICLabel classifier ([Pion-Tonachini et al., 2019](https://www.sciencedirect.com/science/article/pii/S1053811919304185)). Subsequently, non-brain components are discarded and brain components are saved as NumPy arrays ({data/HS_P1_S{run}_eeg.npy}) of dimension `(components × time)`. 
+- The sampling rate is assumed to be 500 Hz throughout. Adjust in `sequences.py` if this changes.
+- Windows are aligned to `LEDOn`, as defined by the `StartTime` and `LEDOn` columns of the original
+  marker files.
+- EEG only. The dataset also contains EMG, kinematics and force channels, which are not processed
+  here.
 
-### 3.  Event-aligned sequence extraction
+## Contributors
 
-The third (and last) preprocessing step is implemented in `sequences.py`. This script combines the neural component matrices with the event marker file (`P1_AllLifts.json`), which contains trial information and event times such as `StartTime/LEDOn`. For each trial, the script extracts two windows: a past window of 1000 samples (≈2 seconds) before LEDOn and a future window of 1500 samples (≈3 seconds) after LEDOn, assuming a 500 Hz sampling rate. These pairs of past and future segments are collected across trials and stored as a Python list of tuples. The final dataset is saved as `train_sequences.pkl`, which contains all the (past, future) arrays needed to train a forecasting model.
+Developed at Brainhack Rome 2025 by [ADD NAMES].
 
-### Assumptions and notes
-
-- Sampling rate: 500 Hz for EEG (as in the data descriptor). Adjust in `sequences.py` if needed.
-- Event alignment: windows are centered on LEDOn as defined in the original dataset (`StartTime, LEDOn` columns)
-- Scope: the code in this repo processes EEG data only. Other data (EMG, kinematics, forces) are present in the dataset but not used here
-
-
-## Citing WAY-EEG-GAL
-
-If you use WAY-EEG-GAL data, please cite the data descriptor:
-
-```Luciw, Jarocka & Edin (2014). Multi-channel EEG recordings during 3,936 grasp and lift trials with varying weight and friction. Scientific Data 1:140047.```
-
-The WAY-EEG-GAL dataset is released under a Creative Commons Attribution 4.0 license ([CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/deed.en)).
+**Anna Notaro**: [state your stages precisely, for example ICA and ICLabel artefact rejection
+(`ica.py`) and extraction of sequences aligned to events (`sequences.py`)].
 
 ## Acknowledgements
 
-This work grew out of the Brainhack project [I Know What You Will Do: Forecasting Motor Behaviour from EEG Time Series](https://github.com/matteo-d-m/brainhack-rome-forecasting). We thank the WAY-EEG-GAL authors and the WAY project for making the data and utilities publicly available.
+This work grew out of the Brainhack project
+[I Know What You Will Do: Forecasting Motor Behaviour from EEG Time Series](https://github.com/matteo-d-m/brainhack-rome-forecasting).
+Thanks to the WAY-EEG-GAL authors and the WAY project for releasing the data and utilities publicly.
